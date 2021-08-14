@@ -902,6 +902,12 @@ impl Builder {
         self
     }
 
+    /// Sets header table size
+    pub fn header_table_size(&mut self, size: u32) -> &mut Self {
+        self.settings.set_header_table_size(Some(size));
+        self
+    }
+
     /// Sets the duration to remember locally reset streams.
     ///
     /// When a stream is explicitly reset, the HTTP/2.0 specification requires
