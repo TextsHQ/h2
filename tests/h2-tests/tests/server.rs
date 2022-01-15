@@ -536,7 +536,7 @@ async fn recv_connection_header() {
         client
             .send_frame(req(7, "transfer-encoding", "chunked"))
             .await;
-        client.send_frame(req(9, "upgrade", "HTTP/2.0")).await;
+        client.send_frame(req(9, "upgrade", "HTTP/2")).await;
         client.recv_frame(frames::reset(1).protocol_error()).await;
         client.recv_frame(frames::reset(3).protocol_error()).await;
         client.recv_frame(frames::reset(5).protocol_error()).await;
@@ -1026,6 +1026,30 @@ async fn server_error_on_unclean_shutdown() {
 }
 
 #[tokio::test]
+async fn server_error_on_status_in_request() {
+    h2_support::trace_init!();
+
+    let (io, mut client) = mock::new();
+
+    let client = async move {
+        let settings = client.assert_server_handshake().await;
+        assert_default_settings!(settings);
+        client
+            .send_frame(frames::headers(1).status(StatusCode::OK))
+            .await;
+        client.recv_frame(frames::reset(1).protocol_error()).await;
+    };
+
+    let srv = async move {
+        let mut srv = server::handshake(io).await.expect("handshake");
+
+        assert!(srv.next().await.is_none());
+    };
+
+    join(client, srv).await;
+}
+
+#[tokio::test]
 async fn request_without_authority() {
     h2_support::trace_init!();
     let (io, mut client) = mock::new();
@@ -1055,6 +1079,260 @@ async fn request_without_authority() {
         stream.send_response(rsp, true).unwrap();
 
         assert!(srv.next().await.is_none());
+    };
+
+    join(client, srv).await;
+}
+
+#[tokio::test]
+async fn serve_when_request_in_response_extensions() {
+    h2_support::trace_init!();
+    let (io, mut client) = mock::new();
+
+    let client = async move {
+        let settings = client.assert_server_handshake().await;
+        assert_default_settings!(settings);
+        client
+            .send_frame(
+                frames::headers(1)
+                    .request("GET", "https://example.com/")
+                    .eos(),
+            )
+            .await;
+        client
+            .recv_frame(frames::headers(1).response(200).eos())
+            .await;
+    };
+
+    let srv = async move {
+        let mut srv = server::handshake(io).await.expect("handshake");
+        let (req, mut stream) = srv.next().await.unwrap().unwrap();
+
+        let mut rsp = http::Response::new(());
+        rsp.extensions_mut().insert(req);
+        stream.send_response(rsp, true).unwrap();
+
+        assert!(srv.next().await.is_none());
+    };
+
+    join(client, srv).await;
+}
+
+#[tokio::test]
+async fn send_reset_explicitly() {
+    h2_support::trace_init!();
+    let (io, mut client) = mock::new();
+
+    let client = async move {
+        let settings = client.assert_server_handshake().await;
+        assert_default_settings!(settings);
+        client
+            .send_frame(
+                frames::headers(1)
+                    .request("GET", "https://example.com/")
+                    .eos(),
+            )
+            .await;
+        client
+            .recv_frame(frames::reset(1).reason(Reason::ENHANCE_YOUR_CALM))
+            .await;
+    };
+
+    let srv = async move {
+        let mut srv = server::handshake(io).await.expect("handshake");
+        let (_req, mut stream) = srv.next().await.unwrap().unwrap();
+
+        stream.send_reset(Reason::ENHANCE_YOUR_CALM);
+
+        assert!(srv.next().await.is_none());
+    };
+
+    join(client, srv).await;
+}
+
+#[tokio::test]
+async fn extended_connect_protocol_disabled_by_default() {
+    h2_support::trace_init!();
+
+    let (io, mut client) = mock::new();
+
+    let client = async move {
+        let settings = client.assert_server_handshake().await;
+
+        assert_eq!(settings.is_extended_connect_protocol_enabled(), None);
+
+        client
+            .send_frame(
+                frames::headers(1)
+                    .request("CONNECT", "http://bread/baguette")
+                    .protocol("the-bread-protocol"),
+            )
+            .await;
+
+        client.recv_frame(frames::reset(1).protocol_error()).await;
+    };
+
+    let srv = async move {
+        let mut srv = server::handshake(io).await.expect("handshake");
+
+        poll_fn(move |cx| srv.poll_closed(cx))
+            .await
+            .expect("server");
+    };
+
+    join(client, srv).await;
+}
+
+#[tokio::test]
+async fn extended_connect_protocol_enabled_during_handshake() {
+    h2_support::trace_init!();
+
+    let (io, mut client) = mock::new();
+
+    let client = async move {
+        let settings = client.assert_server_handshake().await;
+
+        assert_eq!(settings.is_extended_connect_protocol_enabled(), Some(true));
+
+        client
+            .send_frame(
+                frames::headers(1)
+                    .request("CONNECT", "http://bread/baguette")
+                    .protocol("the-bread-protocol"),
+            )
+            .await;
+
+        client.recv_frame(frames::headers(1).response(200)).await;
+    };
+
+    let srv = async move {
+        let mut builder = server::Builder::new();
+
+        builder.enable_connect_protocol();
+
+        let mut srv = builder.handshake::<_, Bytes>(io).await.expect("handshake");
+
+        let (_req, mut stream) = srv.next().await.unwrap().unwrap();
+
+        let rsp = Response::new(());
+        stream.send_response(rsp, false).unwrap();
+
+        poll_fn(move |cx| srv.poll_closed(cx))
+            .await
+            .expect("server");
+    };
+
+    join(client, srv).await;
+}
+
+#[tokio::test]
+async fn reject_pseudo_protocol_on_non_connect_request() {
+    h2_support::trace_init!();
+
+    let (io, mut client) = mock::new();
+
+    let client = async move {
+        let settings = client.assert_server_handshake().await;
+
+        assert_eq!(settings.is_extended_connect_protocol_enabled(), Some(true));
+
+        client
+            .send_frame(
+                frames::headers(1)
+                    .request("GET", "http://bread/baguette")
+                    .protocol("the-bread-protocol"),
+            )
+            .await;
+
+        client.recv_frame(frames::reset(1).protocol_error()).await;
+    };
+
+    let srv = async move {
+        let mut builder = server::Builder::new();
+
+        builder.enable_connect_protocol();
+
+        let mut srv = builder.handshake::<_, Bytes>(io).await.expect("handshake");
+
+        assert!(srv.next().await.is_none());
+
+        poll_fn(move |cx| srv.poll_closed(cx))
+            .await
+            .expect("server");
+    };
+
+    join(client, srv).await;
+}
+
+#[tokio::test]
+async fn reject_authority_target_on_extended_connect_request() {
+    h2_support::trace_init!();
+
+    let (io, mut client) = mock::new();
+
+    let client = async move {
+        let settings = client.assert_server_handshake().await;
+
+        assert_eq!(settings.is_extended_connect_protocol_enabled(), Some(true));
+
+        client
+            .send_frame(
+                frames::headers(1)
+                    .request("CONNECT", "bread:80")
+                    .protocol("the-bread-protocol"),
+            )
+            .await;
+
+        client.recv_frame(frames::reset(1).protocol_error()).await;
+    };
+
+    let srv = async move {
+        let mut builder = server::Builder::new();
+
+        builder.enable_connect_protocol();
+
+        let mut srv = builder.handshake::<_, Bytes>(io).await.expect("handshake");
+
+        assert!(srv.next().await.is_none());
+
+        poll_fn(move |cx| srv.poll_closed(cx))
+            .await
+            .expect("server");
+    };
+
+    join(client, srv).await;
+}
+
+#[tokio::test]
+async fn reject_non_authority_target_on_connect_request() {
+    h2_support::trace_init!();
+
+    let (io, mut client) = mock::new();
+
+    let client = async move {
+        let settings = client.assert_server_handshake().await;
+
+        assert_eq!(settings.is_extended_connect_protocol_enabled(), Some(true));
+
+        client
+            .send_frame(frames::headers(1).request("CONNECT", "https://bread/baguette"))
+            .await;
+
+        client.recv_frame(frames::reset(1).protocol_error()).await;
+    };
+
+    let srv = async move {
+        let mut builder = server::Builder::new();
+
+        builder.enable_connect_protocol();
+
+        let mut srv = builder.handshake::<_, Bytes>(io).await.expect("handshake");
+
+        assert!(srv.next().await.is_none());
+
+        poll_fn(move |cx| srv.poll_closed(cx))
+            .await
+            .expect("server");
     };
 
     join(client, srv).await;

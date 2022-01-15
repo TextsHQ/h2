@@ -2,6 +2,7 @@
 pub use h2;
 
 pub use h2::client;
+pub use h2::ext::Protocol;
 pub use h2::frame::StreamId;
 pub use h2::server;
 pub use h2::*;
@@ -20,8 +21,8 @@ pub use super::{Codec, SendFrame};
 
 // Re-export macros
 pub use super::{
-    assert_closed, assert_data, assert_default_settings, assert_headers, assert_ping, poll_err,
-    poll_frame, raw_codec,
+    assert_closed, assert_data, assert_default_settings, assert_go_away, assert_headers,
+    assert_ping, assert_settings, poll_err, poll_frame, raw_codec,
 };
 
 pub use super::assert::assert_frame_eq;
@@ -121,6 +122,7 @@ pub fn build_large_headers() -> Vec<(&'static str, String)> {
         ("eight", build_large_string('8', 4 * 1024)),
         ("nine", "nine".to_string()),
         ("ten", build_large_string('0', 4 * 1024)),
+        ("eleven", build_large_string('1', 32 * 1024)),
     ]
 }
 

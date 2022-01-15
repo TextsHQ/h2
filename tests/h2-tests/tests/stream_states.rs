@@ -207,13 +207,19 @@ async fn errors_if_recv_frame_exceeds_max_frame_size() {
             let body = resp.into_parts().1;
             let res = util::concat(body).await;
             let err = res.unwrap_err();
-            assert_eq!(err.to_string(), "protocol error: frame with invalid size");
+            assert_eq!(
+                err.to_string(),
+                "connection error detected: frame with invalid size"
+            );
         };
 
         // client should see a conn error
         let conn = async move {
             let err = h2.await.unwrap_err();
-            assert_eq!(err.to_string(), "protocol error: frame with invalid size");
+            assert_eq!(
+                err.to_string(),
+                "connection error detected: frame with invalid size"
+            );
         };
         join(conn, req).await;
     };
@@ -321,7 +327,10 @@ async fn recv_goaway_finishes_processed_streams() {
         // this request will trigger a goaway
         let req2 = async move {
             let err = client.get("https://example.com/").await.unwrap_err();
-            assert_eq!(err.to_string(), "protocol error: not a result of an error");
+            assert_eq!(
+                err.to_string(),
+                "connection error received: not a result of an error"
+            );
         };
 
         join3(async move { h2.await.expect("client") }, req1, req2).await;
@@ -1011,5 +1020,62 @@ async fn srv_window_update_on_lower_stream_id() {
         h2.await.expect("client");
         drop(client);
     };
+    join(srv, client).await;
+}
+
+// See https://github.com/hyperium/h2/issues/570
+#[tokio::test]
+async fn reset_new_stream_before_send() {
+    h2_support::trace_init!();
+    let (io, mut srv) = mock::new();
+
+    let srv = async move {
+        let settings = srv.assert_client_handshake().await;
+        assert_default_settings!(settings);
+        srv.recv_frame(
+            frames::headers(1)
+                .request("GET", "https://example.com/")
+                .eos(),
+        )
+        .await;
+        srv.send_frame(frames::headers(1).response(200).eos()).await;
+        // Send unexpected headers, that depends on itself, causing a framing error.
+        srv.send_bytes(&[
+            0, 0, 0x6,  // len
+            0x1,  // type (headers)
+            0x25, // flags (eos, eoh, pri)
+            0, 0, 0, 0x3, // stream id
+            0, 0, 0, 0x3,  // dependency
+            2,    // weight
+            0x88, // HPACK :status=200
+        ])
+        .await;
+        srv.recv_frame(frames::reset(3).protocol_error()).await;
+        srv.recv_frame(
+            frames::headers(5)
+                .request("GET", "https://example.com/")
+                .eos(),
+        )
+        .await;
+        srv.send_frame(frames::headers(5).response(200).eos()).await;
+    };
+
+    let client = async move {
+        let (mut client, mut conn) = client::handshake(io).await.expect("handshake");
+        let resp = conn
+            .drive(client.get("https://example.com/"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // req number 2
+        let resp = conn
+            .drive(client.get("https://example.com/"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        conn.await.expect("client");
+    };
+
     join(srv, client).await;
 }

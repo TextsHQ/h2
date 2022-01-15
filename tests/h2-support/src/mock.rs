@@ -1,7 +1,8 @@
 use crate::SendFrame;
 
 use h2::frame::{self, Frame};
-use h2::{self, RecvError, SendError};
+use h2::proto::Error;
+use h2::{self, SendError};
 
 use futures::future::poll_fn;
 use futures::{ready, Stream, StreamExt};
@@ -220,22 +221,15 @@ impl Handle {
         let settings = settings.into();
         self.send(settings.into()).await.unwrap();
 
-        let frame = self.next().await;
-        let settings = match frame {
-            Some(frame) => match frame.unwrap() {
-                Frame::Settings(settings) => {
-                    // Send the ACK
-                    let ack = frame::Settings::ack();
+        let frame = self.next().await.expect("unexpected EOF").unwrap();
+        let settings = assert_settings!(frame);
 
-                    // TODO: Don't unwrap?
-                    self.send(ack.into()).await.unwrap();
+        // Send the ACK
+        let ack = frame::Settings::ack();
 
-                    settings
-                }
-                frame => panic!("unexpected frame; frame={:?}", frame),
-            },
-            None => panic!("unexpected EOF"),
-        };
+        // TODO: Don't unwrap?
+        self.send(ack.into()).await.unwrap();
+
         let frame = self.next().await;
         let f = assert_settings!(frame.unwrap().unwrap());
 
@@ -284,7 +278,7 @@ impl Handle {
 }
 
 impl Stream for Handle {
-    type Item = Result<Frame, RecvError>;
+    type Item = Result<Frame, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.codec).poll_next(cx)

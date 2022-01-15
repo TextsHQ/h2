@@ -45,7 +45,7 @@ pub(super) struct Stream {
 
     /// Amount of data buffered at the prioritization layer.
     /// TODO: Technically this could be greater than the window size...
-    pub buffered_send_data: WindowSize,
+    pub buffered_send_data: usize,
 
     /// Task tracking additional send capacity (i.e. window updates).
     send_task: Option<Waker>,
@@ -274,6 +274,17 @@ impl Stream {
 
         // Only notify if the capacity exceeds the amount of buffered data
         if self.send_flow.available() > self.buffered_send_data {
+            tracing::trace!("  notifying task");
+            self.notify_send();
+        }
+    }
+
+    /// If the capacity was limited because of the max_send_buffer_size,
+    /// then consider waking the send task again...
+    pub fn notify_if_can_buffer_more(&mut self) {
+        // Only notify if the capacity exceeds the amount of buffered data
+        if self.send_flow.available() > self.buffered_send_data {
+            self.send_capacity_inc = true;
             tracing::trace!("  notifying task");
             self.notify_send();
         }
